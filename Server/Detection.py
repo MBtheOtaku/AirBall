@@ -2,8 +2,11 @@ import cv2
 import mediapipe as mp
 import numpy as np
 import os
+import time
 from flask import Flask, Response
-from picamera2 import Picamera2
+
+from shot_detector import ShotDetector
+from camera import picam2
 
 app = Flask(__name__)
 
@@ -11,11 +14,9 @@ app = Flask(__name__)
 mp_pose = mp.solutions.pose
 pose_detector = mp_pose.Pose(static_image_mode=False, min_detection_confidence=0.5)
 
-# Set up Cameras
-picam2 = Picamera2()
-config = picam2.create_preview_configuration(main={"size": (640, 480)})
-picam2.configure(config)
-picam2.start()
+# Shot detection and camera setup moved to modules
+detector = ShotDetector()
+
 
 def generate_frames():
     while True:
@@ -36,6 +37,14 @@ def generate_frames():
                 x = int(lm.x * small_w * (1/scale))
                 y = int(lm.y * small_h * (1/scale))
                 coords.append((x, y))
+
+            # Update shot detector with full-resolution frame size and timestamp
+            ts = time.time()
+            shot = detector.update(landmarks, frame.shape[1], frame.shape[0], ts)
+            if shot is not None:
+                # overlay a small notification
+                txt = f"Shot detected: {shot['id'][:8]} dur={shot['duration']:.2f}s"
+                cv2.putText(frame, txt, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
 
             xs = [c[0] for c in coords]
             ys = [c[1] for c in coords]
