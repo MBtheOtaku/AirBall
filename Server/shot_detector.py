@@ -103,6 +103,11 @@ class ShotDetector:
         # upward velocity positive (since we compute ay - by)
         vy = (ay - by) / dt
 
+        # normalize by body scale (px) to get "body-lengths per second"
+        scale_px = float(b.get('scale', 1.0)) if b else 1.0
+        scale_px = max(scale_px, 1.0)
+        vy_norm = vy / scale_px
+
         # elbow angle change
         def elbow_angle_at(entry):
             pix = entry['pix']
@@ -116,7 +121,8 @@ class ShotDetector:
 
 
         # Detection thresholds (tweakable)
-        VY_START = 300.0  # pixels/sec upward (raw pixels)
+        VY_START_NORM = 1.2       # body-lengths per second upward
+        VY_END_NORM   = 0.25      # body-lengths per second upward
         ELBOW_EXTENSION_MIN = 5.0  # degrees increase
         KNEE_BEND_START_DEG = 4.0  # degrees from baseline
 
@@ -137,7 +143,7 @@ class ShotDetector:
             baseline_knee = np.mean([knee_angle_at(e) for e in list(self.buf)[:-2]]) if len(self.buf) > 5 else knee_prev
             knee_drop = baseline_knee - knee_now
 
-            if (vy > VY_START and (elbow_now - elbow_prev) > ELBOW_EXTENSION_MIN) or (knee_drop > KNEE_BEND_START_DEG):
+            if (vy_norm > VY_START_NORM and (elbow_now - elbow_prev) > ELBOW_EXTENSION_MIN)or (knee_drop > KNEE_BEND_START_DEG):
                 self.in_shot = True
                 self.current_shot_frames = list(self.buf)  # include buffer pre-roll
                 return None
@@ -153,12 +159,11 @@ class ShotDetector:
         min_idx = ys.index(min_y)
 
         # compute recent vy and end conditions
-        recent_vy = vy
-        VY_END = 80.0
+        recent_vy_norm = vy_norm
         MAX_DURATION = 3.0
         MIN_SHOT_DURATION = 0.08
         start_ts = self.current_shot_frames[0]['ts']
-        if ((recent_vy < VY_END and b['ts'] - start_ts > MIN_SHOT_DURATION) or (b['ts'] - start_ts) > MAX_DURATION):
+        if ((recent_vy_norm < VY_END_NORM and b['ts'] - start_ts > MIN_SHOT_DURATION) or (b['ts'] - start_ts) > MAX_DURATION):
             shot = self._finalize_shot(self.current_shot_frames, wrist_idx, elbow_idx, shoulder_idx, knee_idx, hip_idx, ankle_idx)
             self.in_shot = False
             self.current_shot_frames = []
