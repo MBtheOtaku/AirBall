@@ -15,6 +15,7 @@ class ShotDetector:
         self.in_shot = False
         self.current_shot_frames = []
         self.last_shot_id = 0
+        self.min_landmark_visibility = 0.55
 
         # landmarks indices
         self.RW = mp.solutions.pose.PoseLandmark.RIGHT_WRIST.value
@@ -24,6 +25,19 @@ class ShotDetector:
         self.RS = mp.solutions.pose.PoseLandmark.RIGHT_SHOULDER.value
         self.LS = mp.solutions.pose.PoseLandmark.LEFT_SHOULDER.value
         self.MID_HIP = mp.solutions.pose.PoseLandmark.LEFT_HIP.value
+
+    def _visibility(self, entry, idx):
+        try:
+            return float(entry['pix'][idx][3])
+        except Exception:
+            return 0.0
+
+    def _has_visibility(self, entry, indices, min_visibility=None):
+        threshold = self.min_landmark_visibility if min_visibility is None else float(min_visibility)
+        return all(self._visibility(entry, idx) >= threshold for idx in indices)
+
+    def _safe_float(self, value):
+        return None if value is None else float(value)
 
     def _angle(self, a, b, c):
         # angle at b between points a-b-c in degrees
@@ -94,6 +108,9 @@ class ShotDetector:
         ankle_idx = mp.solutions.pose.PoseLandmark.RIGHT_ANKLE.value if side == 'right' else mp.solutions.pose.PoseLandmark.LEFT_ANKLE.value
         hip_idx = mp.solutions.pose.PoseLandmark.RIGHT_HIP.value if side == 'right' else mp.solutions.pose.PoseLandmark.LEFT_HIP.value
 
+        upper_indices = [wrist_idx, elbow_idx, shoulder_idx]
+        lower_indices = [hip_idx, knee_idx, ankle_idx]
+
         # get last two frames
         a = self.buf[-2]
         b = self.buf[-1]
@@ -110,6 +127,8 @@ class ShotDetector:
 
         # elbow angle change
         def elbow_angle_at(entry):
+            if not self._has_visibility(entry, upper_indices):
+                return None
             pix = entry['pix']
             shoulder = (pix[shoulder_idx][0], pix[shoulder_idx][1])
             elbow = (pix[elbow_idx][0], pix[elbow_idx][1])
@@ -128,6 +147,8 @@ class ShotDetector:
 
         # compute knee angles to help detect load
         def knee_angle_at(entry):
+            if not self._has_visibility(entry, lower_indices):
+                return None
             pix = entry['pix']
             hip = (pix[hip_idx][0], pix[hip_idx][1])
             knee = (pix[knee_idx][0], pix[knee_idx][1])
@@ -140,10 +161,17 @@ class ShotDetector:
         if not self.in_shot:
             # detect movement start if wrist moves up quickly and elbow starts extending
             # or if knee begins bending compared to buffer baseline
-            baseline_knee = np.mean([knee_angle_at(e) for e in list(self.buf)[:-2]]) if len(self.buf) > 5 else knee_prev
-            knee_drop = baseline_knee - knee_now
+            arm_start = elbow_prev is not None and elbow_now is not None and (vy_norm > VY_START_NORM) and ((elbow_now - elbow_prev) > ELBOW_EXTENSION_MIN)
+            knee_start = False
+            if knee_now is not None:
+                baseline_candidates = [knee_angle_at(e) for e in list(self.buf)[:-2]] if len(self.buf) > 5 else [knee_prev]
+                baseline_vals = [v for v in baseline_candidates if v is not None]
+                if baseline_vals:
+                    baseline_knee = float(np.mean(baseline_vals))
+                    knee_drop = baseline_knee - knee_now
+                    knee_start = knee_drop > KNEE_BEND_START_DEG
 
-            if (vy_norm > VY_START_NORM and (elbow_now - elbow_prev) > ELBOW_EXTENSION_MIN)or (knee_drop > KNEE_BEND_START_DEG):
+            if arm_start or knee_start:
                 self.in_shot = True
                 self.current_shot_frames = list(self.buf)  # include buffer pre-roll
                 return None
@@ -191,6 +219,15 @@ class ShotDetector:
         head_positions = []
         scales = []
         ts_list = [f['ts'] for f in frames]
+        upper_indices = [wrist_idx, elbow_idx, shoulder_idx]
+        lower_indices = [hip_idx, knee_idx, ankle_idx]
+
+        wrist_vis = [self._visibility(f, wrist_idx) for f in frames]
+        knee_vis = [self._visibility(f, knee_idx) for f in frames]
+        upper_vis_ratio = float(np.mean([1.0 if self._has_visibility(f, upper_indices) else 0.0 for f in frames])) if frames else 0.0
+        lower_vis_ratio = float(np.mean([1.0 if self._has_visibility(f, lower_indices) else 0.0 for f in frames])) if frames else 0.0
+        wrist_vis_ratio = float(np.mean([1.0 if v >= self.min_landmark_visibility else 0.0 for v in wrist_vis])) if wrist_vis else 0.0
+        knee_vis_ratio = float(np.mean([1.0 if v >= self.min_landmark_visibility else 0.0 for v in knee_vis])) if knee_vis else 0.0
 
         nose_idx = mp.solutions.pose.PoseLandmark.NOSE.value
 
@@ -205,9 +242,9 @@ class ShotDetector:
             ankle = (pix[ankle_idx][0], pix[ankle_idx][1])
             nose = (pix[nose_idx][0], pix[nose_idx][1]) if nose_idx < len(pix) else (sh[0], sh[1]-100)
 
-            elbow_angles.append(self._angle(sh, el, wr))
-            knee_angles.append(self._angle(hip, knee, ankle))
-            hip_angles.append(self._angle(sh, hip, knee))
+            elbow_angles.append(self._angle(sh, el, wr) if self._has_visibility(f, upper_indices) else np.nan)
+            knee_angles.append(self._angle(hip, knee, ankle) if self._has_visibility(f, lower_indices) else np.nan)
+            hip_angles.append(self._angle(sh, hip, knee) if self._has_visibility(f, lower_indices) else np.nan)
             wrist_positions.append({'x': wr[0], 'y': wr[1]})
             shoulder_positions.append({'x': sh[0], 'y': sh[1]})
             head_positions.append({'x': nose[0], 'y': nose[1]})
@@ -217,31 +254,37 @@ class ShotDetector:
 
         # release (apex) based on wrist y (minimum y)
         wrist_ys = [p['y'] for p in wrist_positions]
-        release_i = int(np.argmin(wrist_ys))
+        wrist_candidate_indices = [i for i, v in enumerate(wrist_vis) if v >= self.min_landmark_visibility]
+        release_i = min(wrist_candidate_indices, key=lambda i: wrist_ys[i]) if wrist_candidate_indices else int(np.argmin(wrist_ys))
         release_ts = ts_list[release_i]
 
         # Load: maximum knee bend (minimum knee angle)
-        load_i = int(np.argmin(knee_angles))
-        load_ts = ts_list[load_i]
+        valid_knee_indices = [i for i, v in enumerate(knee_angles) if np.isfinite(v)]
+        load_i = min(valid_knee_indices, key=lambda i: knee_angles[i]) if valid_knee_indices else None
+        load_ts = ts_list[load_i] if load_i is not None else None
 
         # Hip extension start: first index after load where hip angle increases by threshold
         HIP_EXT_THRESH = 4.0
-        hip_at_load = hip_angles[load_i]
+        hip_at_load = hip_angles[load_i] if load_i is not None and np.isfinite(hip_angles[load_i]) else None
         hip_ext_i = None
-        for i in range(load_i, len(hip_angles)):
-            if hip_angles[i] - hip_at_load > HIP_EXT_THRESH:
-                hip_ext_i = i
-                break
+        if load_i is not None and hip_at_load is not None:
+            for i in range(load_i, len(hip_angles)):
+                if np.isfinite(hip_angles[i]) and hip_angles[i] - hip_at_load > HIP_EXT_THRESH:
+                    hip_ext_i = i
+                    break
         hip_ext_ts = ts_list[hip_ext_i] if hip_ext_i is not None else None
 
         # Elbow extension start: first index where elbow angle increases notably before release
         ELBOW_EXT_THRESH = 5.0
-        elbow_min_before_release = float(np.min(elbow_angles[:release_i+1]))
+        elbow_vals_before_release = [v for v in elbow_angles[:release_i+1] if np.isfinite(v)]
+        elbow_min_before_release = float(min(elbow_vals_before_release)) if elbow_vals_before_release else None
         elbow_ext_i = None
-        for i in range(load_i, release_i+1):
-            if elbow_angles[i] - elbow_min_before_release > ELBOW_EXT_THRESH:
-                elbow_ext_i = i
-                break
+        elbow_start_i = load_i if load_i is not None else 0
+        if elbow_min_before_release is not None:
+            for i in range(elbow_start_i, release_i+1):
+                if np.isfinite(elbow_angles[i]) and elbow_angles[i] - elbow_min_before_release > ELBOW_EXT_THRESH:
+                    elbow_ext_i = i
+                    break
         elbow_ext_ts = ts_list[elbow_ext_i] if elbow_ext_i is not None else None
 
         # Wrist snap: max angular velocity of forearm vector (elbow->wrist)
@@ -274,13 +317,13 @@ class ShotDetector:
         rel_shoulder_y = (shoulder_positions[release_i]['y'] - wrist_positions[release_i]['y']) / scale
 
         # Knee angles at load and at release
-        knee_at_load = float(knee_angles[load_i])
-        knee_at_release = float(knee_angles[release_i])
+        knee_at_load = float(knee_angles[load_i]) if load_i is not None and np.isfinite(knee_angles[load_i]) else None
+        knee_at_release = float(knee_angles[release_i]) if np.isfinite(knee_angles[release_i]) else None
 
         # Elbow angles at set (start), load, release, follow-through
-        elbow_at_set = float(elbow_angles[0])
-        elbow_at_load = float(elbow_angles[load_i])
-        elbow_at_release = float(elbow_angles[release_i])
+        elbow_at_set = float(elbow_angles[0]) if np.isfinite(elbow_angles[0]) else None
+        elbow_at_load = float(elbow_angles[load_i]) if load_i is not None and np.isfinite(elbow_angles[load_i]) else None
+        elbow_at_release = float(elbow_angles[release_i]) if np.isfinite(elbow_angles[release_i]) else None
 
         # Head stability: vertical variance around release frame (+/- 5 frames)
         window = 5
@@ -310,6 +353,20 @@ class ShotDetector:
         follow_end_ts = ts_list[follow_end_i] if follow_end_i is not None and follow_end_i < len(ts_list) else None
         follow_hold_duration = float(follow_end_ts - follow_start_ts) if follow_start_ts and follow_end_ts else 0.0
 
+        quality_score = 0.6 * upper_vis_ratio + 0.4 * lower_vis_ratio
+        if quality_score >= 0.8:
+            confidence = 'high'
+        elif quality_score >= 0.55:
+            confidence = 'medium'
+        else:
+            confidence = 'low'
+
+        conservative_feedback = confidence == 'low' or lower_vis_ratio < 0.45
+        if conservative_feedback:
+            feedback_message = 'Tracking confidence is limited due to partial body visibility. Keep all major joints in frame (especially hips, knees, and ankles) for more accurate coaching feedback.'
+        else:
+            feedback_message = 'Tracking confidence is sufficient for detailed shot-form feedback.'
+
         # Build metrics (both raw and normalized where appropriate)
         shot_id = str(uuid.uuid4())
         shot = {
@@ -318,7 +375,7 @@ class ShotDetector:
             'fps': float(fps),
             'phases': {
                 'set': {'ts': float(start_ts)},
-                'load': {'ts': float(load_ts), 'knee_angle_deg': knee_at_load},
+                'load': {'ts': self._safe_float(load_ts), 'knee_angle_deg': self._safe_float(knee_at_load)},
                 'hip_extension_start': {'ts': float(hip_ext_ts) if hip_ext_ts else None},
                 'elbow_extension_start': {'ts': float(elbow_ext_ts) if elbow_ext_ts else None},
                 'wrist_snap': {'ts': float(snap_ts) if snap_ts else None, 'angular_velocity_rad_s': snap_ang_v},
@@ -332,17 +389,17 @@ class ShotDetector:
             'metrics': {
                 'angles': {
                     'elbow': {
-                        'at_set_deg': elbow_at_set,
-                        'at_load_deg': elbow_at_load,
-                        'at_release_deg': elbow_at_release
+                        'at_set_deg': self._safe_float(elbow_at_set),
+                        'at_load_deg': self._safe_float(elbow_at_load),
+                        'at_release_deg': self._safe_float(elbow_at_release)
                     },
                     'knee': {
-                        'min_during_load_deg': knee_at_load,
-                        'at_release_deg': knee_at_release
+                        'min_during_load_deg': self._safe_float(knee_at_load),
+                        'at_release_deg': self._safe_float(knee_at_release)
                     },
                     'hip': {
-                        'at_load_deg': float(hip_angles[load_i]) if hip_angles else 0.0,
-                        'peak_extension_deg': float(max(hip_angles)) if hip_angles else 0.0
+                        'at_load_deg': self._safe_float(hip_angles[load_i]) if load_i is not None and np.isfinite(hip_angles[load_i]) else None,
+                        'peak_extension_deg': self._safe_float(np.nanmax(hip_angles)) if np.any(np.isfinite(hip_angles)) else None
                     }
                 },
                 'velocities': {
@@ -361,6 +418,23 @@ class ShotDetector:
                 'stability': {
                     'head_vertical_variance_norm': head_var
                 }
+            },
+            'data_quality': {
+                'confidence': confidence,
+                'upper_body_visibility_ratio': upper_vis_ratio,
+                'lower_body_visibility_ratio': lower_vis_ratio,
+                'wrist_visibility_ratio': wrist_vis_ratio,
+                'knee_visibility_ratio': knee_vis_ratio,
+                'occlusion_flags': {
+                    'upper_body_occluded': upper_vis_ratio < 0.5,
+                    'lower_body_occluded': lower_vis_ratio < 0.5,
+                    'wrist_often_missing': wrist_vis_ratio < 0.6,
+                    'knee_often_missing': knee_vis_ratio < 0.6
+                }
+            },
+            'feedback_guardrails': {
+                'mode': 'conservative' if conservative_feedback else 'normal',
+                'message': feedback_message
             },
             'frame_count': len(frames)
         }
