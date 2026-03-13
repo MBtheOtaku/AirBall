@@ -379,14 +379,15 @@ class ShotDetector:
 
         ball_in_hand_confirmed = ball_in_hand_score is not None and ball_in_hand_score >= 0.6 and ball_presence_ratio >= 0.5
         grip_feedback_eligible = ball_in_hand_confirmed and palm_gap_px_mean is not None
+        allow_shot_feedback = bool(ball_in_hand_confirmed)
 
         conservative_feedback = confidence == 'low' or lower_vis_ratio < 0.45
-        if conservative_feedback:
-            feedback_message = 'Tracking confidence is limited due to partial body visibility. Keep all major joints in frame (especially hips, knees, and ankles) for more accurate coaching feedback.'
-        elif not ball_supported:
-            feedback_message = 'Ball context is not available in this run, so grip and palm-gap feedback is disabled to avoid inaccurate advice.'
+        if not ball_supported:
+            feedback_message = 'Ball context is not available in this run, so shot feedback is disabled until ball-in-hand evidence is available.'
         elif not ball_in_hand_confirmed:
-            feedback_message = 'Ball-in-hand evidence is weak for this shot. Grip-specific feedback is disabled to avoid overconfident conclusions.'
+            feedback_message = 'Ball-in-hand evidence is weak for this shot. Shot feedback is disabled to avoid overconfident conclusions.'
+        elif conservative_feedback:
+            feedback_message = 'Ball-in-hand is confirmed, but tracking confidence is limited due to partial body visibility. Keep all major joints in frame (especially hips, knees, and ankles) for more accurate coaching feedback.'
         else:
             feedback_message = 'Tracking confidence is sufficient for detailed shot-form feedback.'
 
@@ -467,6 +468,7 @@ class ShotDetector:
             'feedback_guardrails': {
                 'mode': 'conservative' if conservative_feedback else 'normal',
                 'message': feedback_message,
+                'allow_shot_feedback': allow_shot_feedback,
                 'allow_grip_feedback': grip_feedback_eligible
             },
             'frame_count': len(frames)
