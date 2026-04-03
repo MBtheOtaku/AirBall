@@ -1,14 +1,10 @@
 import cv2
 import mediapipe as mp
 import numpy as np
-import os
 import time
-from flask import Flask, Response
 
 from shot_detector import ShotDetector
 from camera import picam2
-
-app = Flask(__name__)
 
 # Initialize body detection
 mp_pose = mp.solutions.pose
@@ -148,14 +144,3 @@ def generate_frames():
         ret, buffer = cv2.imencode('.jpg', frame)
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
-
-@app.route('/video_feed')
-def video_feed():
-    return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
-
-@app.route('/')
-def index():
-    return "<h1>Security Feed (Body Tracking Only)</h1><img src='/video_feed' width='640'>"
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, threaded=True)
