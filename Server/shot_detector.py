@@ -427,7 +427,7 @@ class ShotDetector:
                     }
                 },
                 'velocities': {
-                    'peak_wrist_vertical_px_s': float(np.max(np.diff(wrist_ys) / np.maximum(np.array(dts), 1e-6))) if len(dts) else 0.0,
+                    'peak_wrist_vertical_px_s': float(np.max(-np.diff(wrist_ys) / np.maximum(np.array(dts), 1e-6))) if len(dts) else 0.0,
                     'peak_forearm_angular_velocity_rad_s': float(max(forearm_ang_vel)) if forearm_ang_vel else 0.0
                 },
                 'release': {
