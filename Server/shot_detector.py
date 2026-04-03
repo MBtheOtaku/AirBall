@@ -309,7 +309,7 @@ class ShotDetector:
         # Sequencing
         leg_drive_before_arm = None
         leg_to_elbow_delay = None
-        if hip_ext_ts and elbow_ext_ts:
+        if hip_ext_ts is not None and elbow_ext_ts is not None:
             leg_drive_before_arm = hip_ext_ts < elbow_ext_ts
             leg_to_elbow_delay = float((elbow_ext_ts - hip_ext_ts))
 
@@ -352,7 +352,7 @@ class ShotDetector:
                 follow_end_i = hold_i
         follow_start_ts = ts_list[follow_start_i] if follow_start_i is not None else None
         follow_end_ts = ts_list[follow_end_i] if follow_end_i is not None and follow_end_i < len(ts_list) else None
-        follow_hold_duration = float(follow_end_ts - follow_start_ts) if follow_start_ts and follow_end_ts else 0.0
+        follow_hold_duration = float(follow_end_ts - follow_start_ts) if follow_start_ts is not None and follow_end_ts is not None else 0.0
 
         quality_score = 0.6 * upper_vis_ratio + 0.4 * lower_vis_ratio
         if quality_score >= 0.8:
@@ -400,9 +400,9 @@ class ShotDetector:
             'phases': {
                 'set': {'ts': float(start_ts)},
                 'load': {'ts': self._safe_float(load_ts), 'knee_angle_deg': self._safe_float(knee_at_load)},
-                'hip_extension_start': {'ts': float(hip_ext_ts) if hip_ext_ts else None},
-                'elbow_extension_start': {'ts': float(elbow_ext_ts) if elbow_ext_ts else None},
-                'wrist_snap': {'ts': float(snap_ts) if snap_ts else None, 'angular_velocity_rad_s': snap_ang_v},
+                'hip_extension_start': {'ts': float(hip_ext_ts) if hip_ext_ts is not None else None},
+                'elbow_extension_start': {'ts': float(elbow_ext_ts) if elbow_ext_ts is not None else None},
+                'wrist_snap': {'ts': float(snap_ts) if snap_ts is not None else None, 'angular_velocity_rad_s': snap_ang_v},
                 'release': {'ts': float(release_ts)} ,
                 'follow_through': {'start_ts': follow_start_ts, 'end_ts': follow_end_ts, 'hold_duration': follow_hold_duration}
             },
