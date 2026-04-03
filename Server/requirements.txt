@@ -1,2 +1,6 @@
-fastapi 
+fastapi
 uvicorn
+numpy
+mediapipe
+opencv-python
+picamera2
