@@ -13,7 +13,7 @@ load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 
 def _get_cors_origins() -> list[str]:
-    raw_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000")
+    raw_origins = os.getenv("AIRBALL_ALLOWED_ORIGINS") or os.getenv("CORS_ORIGINS", "http://localhost:3000")
     return [origin.strip() for origin in raw_origins.split(",") if origin.strip()]
 
 app = FastAPI(
