@@ -14,7 +14,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "AIrBall",
+  title: "AirBall",
   description: "AI-powered basketball shot analysis",
 };
 
