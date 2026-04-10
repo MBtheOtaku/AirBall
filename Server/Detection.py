@@ -14,6 +14,7 @@ import ollama
 
 from shot_detector import ShotDetector
 from camera import picam2
+from ball_detector import detect_ball_state
 
 app = Flask(__name__)
 
@@ -341,7 +342,7 @@ def video_feed():
 
 @app.route('/')
 def index():
-    return "<h1>Security Feed (Body Tracking Only)</h1><img src='/video_feed' width='640'>"
+    return "<h1>AirBall Live Feed</h1><img src='/video_feed' width='640'>"
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, threaded=True)
