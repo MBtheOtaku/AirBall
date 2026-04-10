@@ -474,8 +474,9 @@ class ShotDetector:
 
         # Save JSON to Shots folder
         try:
-            os.makedirs('Shots', exist_ok=True)
-            fname = os.path.join('Shots', f'shot_{shot_id}.json')
+            shots_dir = os.path.join(os.path.dirname(__file__), 'Shots')
+            os.makedirs(shots_dir, exist_ok=True)
+            fname = os.path.join(shots_dir, f'shot_{shot_id}.json')
             with open(fname, 'w') as f:
                 json.dump(shot, f, indent=2)
         except Exception:
