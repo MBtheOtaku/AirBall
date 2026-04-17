@@ -391,6 +391,15 @@ class ShotDetector:
             feedback_message = 'Tracking confidence is sufficient for detailed shot-form feedback.'
 
         # Build metrics (both raw and normalized where appropriate)
+        wrist_vertical_velocities = []
+        for i in range(1, len(wrist_ys)):
+            dt_i = dts[i - 1] if i - 1 < len(dts) else median_dt
+            dt_i = max(float(dt_i), 1e-6)
+            # Image Y increases downward, so upward motion is previous_y - current_y.
+            wrist_vertical_velocities.append((wrist_ys[i - 1] - wrist_ys[i]) / dt_i)
+
+        peak_upward_wrist_vy = float(max(wrist_vertical_velocities)) if wrist_vertical_velocities else 0.0
+
         shot_id = str(uuid.uuid4())
         shot = {
             'id': shot_id,
@@ -426,7 +435,7 @@ class ShotDetector:
                     }
                 },
                 'velocities': {
-                    'peak_wrist_vertical_px_s': float(np.max(np.diff(wrist_ys) / np.maximum(np.array(dts), 1e-6))) if len(dts) else 0.0,
+                    'peak_wrist_vertical_px_s': peak_upward_wrist_vy,
                     'peak_forearm_angular_velocity_rad_s': float(max(forearm_ang_vel)) if forearm_ang_vel else 0.0
                 },
                 'release': {

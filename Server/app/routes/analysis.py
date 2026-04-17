@@ -13,10 +13,17 @@ from fastapi import APIRouter, HTTPException, UploadFile, File, status
 # Allow importing shot_detector from the Server root
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from shot_detector import ShotDetector
+from ball_detector import detect_ball_state
 
 router = APIRouter(prefix="/analyze", tags=["analysis"])
 
 LLM_MODEL = "gemma3:1b"
+POSE_MIN_DETECTION_CONFIDENCE = float(os.getenv("POSE_MIN_DETECTION_CONFIDENCE", "0.3"))
+POSE_NUM_POSES = int(os.getenv("POSE_NUM_POSES", "1"))
+
+_LLM_MODEL_OVERRIDE = os.getenv("AIRBALL_LLM_MODEL")
+if _LLM_MODEL_OVERRIDE:
+    LLM_MODEL = _LLM_MODEL_OVERRIDE
 
 # Path to the PoseLandmarker model file
 _MODEL_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "pose_landmarker_lite.task")
@@ -29,6 +36,25 @@ class _FakeLandmark:
     y: float
     z: float
     visibility: float
+
+
+def _update_detector_with_frame(
+    detector: ShotDetector,
+    frame: np.ndarray,
+    landmarks: list[_FakeLandmark],
+    frame_w: int,
+    frame_h: int,
+    ts: float,
+):
+    """Compute optional ball context and update shot detector for one frame."""
+    ball_state = None
+    try:
+        ball_state = detect_ball_state(frame, landmarks, frame_w, frame_h)
+    except Exception:
+        # Ball context is optional; continue shot detection when unavailable.
+        ball_state = None
+
+    return detector.update(landmarks, frame_w, frame_h, ts, ball_state=ball_state)
 
 
 def _process_video(file_path: str) -> list[dict]:
@@ -55,8 +81,8 @@ def _process_video(file_path: str) -> list[dict]:
     options = mp.tasks.vision.PoseLandmarkerOptions(
         base_options=mp.tasks.BaseOptions(model_asset_path=model_path),
         running_mode=mp.tasks.vision.RunningMode.VIDEO,
-        num_poses=1,
-        min_pose_detection_confidence=0.3,
+        num_poses=POSE_NUM_POSES,
+        min_pose_detection_confidence=POSE_MIN_DETECTION_CONFIDENCE,
     )
     landmarker = mp.tasks.vision.PoseLandmarker.create_from_options(options)
 
@@ -89,7 +115,7 @@ def _process_video(file_path: str) -> list[dict]:
                 for lm in raw_landmarks
             ]
 
-            shot = detector.update(landmarks, frame_w, frame_h, ts)
+            shot = _update_detector_with_frame(detector, frame, landmarks, frame_w, frame_h, ts)
             if shot is not None:
                 shots.append(shot)
 
@@ -102,7 +128,11 @@ def _process_video(file_path: str) -> list[dict]:
 
 def _derive_scores(shot: dict) -> dict:
     """Derive the four summary stats from real shot data."""
-    confidence = shot.get("data_quality", {}).get("confidence", "low")
+    data_quality = shot.get("data_quality", {})
+    confidence = data_quality.get("confidence", "low")
+    occlusion_flags = data_quality.get("occlusion_flags", {})
+    guardrail_mode = shot.get("feedback_guardrails", {}).get("mode", "normal")
+
     base = {"high": 80, "medium": 70, "low": 60}.get(confidence, 65)
 
     if shot.get("timing", {}).get("leg_drive_before_arm_extension"):
@@ -110,7 +140,22 @@ def _derive_scores(shot: dict) -> dict:
     hold = shot.get("metrics", {}).get("follow_through", {}).get("hold_duration_s") or 0
     if hold > 0.1:
         base += 5
-    shot_score = min(100, base)
+
+    quality_penalty = 0
+    if occlusion_flags.get("lower_body_occluded"):
+        quality_penalty += 8
+    if occlusion_flags.get("upper_body_occluded"):
+        quality_penalty += 5
+    if (data_quality.get("wrist_visibility_ratio") or 1.0) < 0.6:
+        quality_penalty += 4
+    if (data_quality.get("knee_visibility_ratio") or 1.0) < 0.6:
+        quality_penalty += 4
+    if guardrail_mode == "conservative":
+        quality_penalty += 8
+
+    shot_score = min(100, max(40, base - quality_penalty))
+    if guardrail_mode == "conservative":
+        shot_score = min(shot_score, 75)
 
     elbow = shot.get("metrics", {}).get("angles", {}).get("elbow", {})
     arc_angle = round(elbow.get("at_release_deg") or 0) or None
@@ -122,6 +167,8 @@ def _derive_scores(shot: dict) -> dict:
     if hold > 0.05:
         ft_score += min(30, int(hold * 100))
     follow_through_score = min(100, ft_score)
+    if guardrail_mode == "conservative":
+        follow_through_score = min(follow_through_score, 80)
 
     return {
         "shot_score": shot_score,

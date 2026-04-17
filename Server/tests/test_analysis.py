@@ -204,3 +204,83 @@ def test_derive_scores_low_confidence():
 
     assert scores["shot_score"] == 60
     assert scores["follow_through_score"] == 70
+
+
+def test_derive_scores_conservative_mode_caps_scores():
+    from app.routes.analysis import _derive_scores
+    shot = _make_fake_shot()
+    shot["feedback_guardrails"]["mode"] = "conservative"
+    shot["metrics"]["follow_through"]["hold_duration_s"] = 0.5
+    scores = _derive_scores(shot)
+
+    assert scores["shot_score"] <= 75
+    assert scores["follow_through_score"] <= 80
+
+
+def test_derive_scores_penalize_occlusion_and_low_visibility():
+    from app.routes.analysis import _derive_scores
+    shot = _make_fake_shot()
+    shot["data_quality"]["occlusion_flags"]["lower_body_occluded"] = True
+    shot["data_quality"]["occlusion_flags"]["upper_body_occluded"] = True
+    shot["data_quality"]["wrist_visibility_ratio"] = 0.4
+    shot["data_quality"]["knee_visibility_ratio"] = 0.5
+
+    scores = _derive_scores(shot)
+    assert scores["shot_score"] < 95
+
+
+def test_update_detector_with_frame_passes_ball_state():
+    from app.routes.analysis import _update_detector_with_frame
+
+    frame = np.zeros((120, 160, 3), dtype=np.uint8)
+    landmarks = [MagicMock(x=0.5, y=0.5, z=0.0, visibility=0.9)]
+    fake_detector = MagicMock()
+    fake_detector.update.return_value = {"id": "shot-1"}
+    fake_ball_state = {"detected": True, "in_hand_score": 0.8, "palm_gap_px": 4.2}
+
+    with patch("app.routes.analysis.detect_ball_state", return_value=fake_ball_state):
+        shot = _update_detector_with_frame(
+            detector=fake_detector,
+            frame=frame,
+            landmarks=landmarks,
+            frame_w=160,
+            frame_h=120,
+            ts=0.1,
+        )
+
+    assert shot == {"id": "shot-1"}
+    fake_detector.update.assert_called_once_with(
+        landmarks,
+        160,
+        120,
+        0.1,
+        ball_state=fake_ball_state,
+    )
+
+
+def test_update_detector_with_frame_ball_detector_failure():
+    from app.routes.analysis import _update_detector_with_frame
+
+    frame = np.zeros((120, 160, 3), dtype=np.uint8)
+    landmarks = [MagicMock(x=0.5, y=0.5, z=0.0, visibility=0.9)]
+    fake_detector = MagicMock()
+    fake_detector.update.return_value = None
+
+    with patch("app.routes.analysis.detect_ball_state", side_effect=RuntimeError("boom")):
+        shot = _update_detector_with_frame(
+            detector=fake_detector,
+            frame=frame,
+            landmarks=landmarks,
+            frame_w=160,
+            frame_h=120,
+            ts=0.2,
+        )
+
+    assert shot is None
+    fake_detector.update.assert_called_once_with(
+        landmarks,
+        160,
+        120,
+        0.2,
+        ball_state=None,
+    )

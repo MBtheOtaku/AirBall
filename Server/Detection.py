@@ -14,16 +14,6 @@ import ollama
 
 from shot_detector import ShotDetector
 from camera import picam2
-from ball_detector import detect_ball_state
-
-app = Flask(__name__)
-
-# Initialize person detection with YOLO
-person_detector = YOLO('yolov8n.pt')  
-
-# Buffers to store recent ball and wrist positions for verification
-ball_buffer = deque(maxlen=180)
-wrist_buffer = deque(maxlen=180)
 
 # Initialize body detection
 mp_pose = mp.solutions.pose
@@ -32,118 +22,82 @@ pose_detector = mp_pose.Pose(static_image_mode=True, min_detection_confidence=0.
 # Shot detection and camera setup moved to modules
 detector = ShotDetector()
 
-# Shot clip + cooldown settings
-SHOT_COOLDOWN_SECONDS = 5.0
-CLIP_PRE_SECONDS = 1.5
-CLIP_POST_SECONDS = 1.5
-FRAME_BUFFER_SECONDS = 8.0
-OUTPUT_DIR = os.path.join(os.path.dirname(__file__), '..', 'Shots')
-LLM_MODEL = 'gemma3:1b'
 
-# Run LLM feedback in the background so streaming inference does not block.
-feedback_queue = queue.Queue(maxsize=32)
+def _dist(p1, p2):
+    return float(np.hypot(p1[0] - p2[0], p1[1] - p2[1]))
 
 
-def _ensure_output_dir():
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-
-
-def _save_clip(frames, shot_id):
-    if not frames:
-        return None
-
-    _ensure_output_dir()
-
-    first_ts = frames[0]['ts']
-    last_ts = frames[-1]['ts']
-    if len(frames) > 1 and last_ts > first_ts:
-        fps = (len(frames) - 1) / (last_ts - first_ts)
-        fps = max(10.0, min(60.0, fps))
-    else:
-        fps = 20.0
-
-    first_frame = frames[0]['frame']
-    height, width = first_frame.shape[:2]
-    stamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
-    safe_id = (shot_id or 'unknown')[:8]
-    out_path = os.path.join(OUTPUT_DIR, f"shot_{safe_id}_{stamp}.mp4")
-
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    writer = cv2.VideoWriter(out_path, fourcc, fps, (width, height))
-    if not writer.isOpened():
-        return None
-
-    for entry in frames:
-        writer.write(entry['frame'])
-    writer.release()
-    return out_path
-
-
-def _find_shot_json_path(shot_id):
-    candidates = [
-        os.path.join(OUTPUT_DIR, f'shot_{shot_id}.json'),
-        os.path.join('Shots', f'shot_{shot_id}.json'),
-        os.path.join(os.path.dirname(__file__), 'Shots', f'shot_{shot_id}.json'),
-    ]
-    for path in candidates:
-        if os.path.exists(path):
-            return path
-    return None
-
-
-def _print_llm_feedback_for_shot(shot_id):
-    shot_path = _find_shot_json_path(shot_id)
-    if not shot_path:
-        print(f"LLM skipped: shot JSON not found for shot {shot_id[:8]}")
-        return
-
+def _compute_scale_px(landmarks, frame_w, frame_h):
     try:
-        with open(shot_path, 'r', encoding='utf-8') as f:
-            shot_data = json.load(f)
-
-        response = ollama.chat(
-            model=LLM_MODEL,
-            messages=[
-                {
-                    'role': 'system',
-                    'content': 'You are a helpful sports performance coach assistant. Provide clear, concise, and actionable shooting feedback.'
-                },
-                {
-                    'role': 'user',
-                    'content': (
-                        'I collected basketball shot form data. Provide feedback in four sections: '
-                        'overall assessment, strengths, areas for improvement, and top 3 prioritized recommendations. '
-                        'Avoid raw timestamps and precise floating-point values. Keep the tone encouraging and practical. '
-                        f'Data: {json.dumps(shot_data, indent=2)}'
-                    )
-                }
-            ]
-        )
-        feedback = response.get('message', {}).get('content', '').strip()
-        if feedback:
-            _ensure_output_dir()
-            feedback_path = os.path.join(OUTPUT_DIR, f'shot_feedback_{shot_id[:8]}.txt')
-            with open(feedback_path, 'w', encoding='utf-8') as f:
-                f.write(feedback)
-            print(f"\n=== LLM Feedback for shot {shot_id[:8]} ===\n{feedback}\n")
-            print(f"Feedback saved: {feedback_path}")
-        else:
-            print(f"LLM returned empty feedback for shot {shot_id[:8]}")
-    except Exception as exc:
-        print(f"LLM feedback failed for shot {shot_id[:8]}: {exc}")
+        ls = landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER].x * frame_w
+        rs = landmarks[mp_pose.PoseLandmark.RIGHT_SHOULDER].x * frame_w
+        ls_y = landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER].y * frame_h
+        rs_y = landmarks[mp_pose.PoseLandmark.RIGHT_SHOULDER].y * frame_h
+        shoulder_width = _dist((ls, ls_y), (rs, rs_y))
+        return max(shoulder_width, 1.0)
+    except Exception:
+        return max(frame_h * 0.25, 1.0)
 
 
-def _feedback_worker_loop():
-    while True:
-        shot_id = feedback_queue.get()
-        try:
-            _print_llm_feedback_for_shot(shot_id)
-        finally:
-            feedback_queue.task_done()
+def _choose_wrist(landmarks, frame_w, frame_h):
+    try:
+        rv = float(getattr(landmarks[mp_pose.PoseLandmark.RIGHT_WRIST], 'visibility', 0.0))
+        lv = float(getattr(landmarks[mp_pose.PoseLandmark.LEFT_WRIST], 'visibility', 0.0))
+        wrist_idx = mp_pose.PoseLandmark.RIGHT_WRIST if rv >= lv else mp_pose.PoseLandmark.LEFT_WRIST
+        wrist = landmarks[wrist_idx]
+        return (float(wrist.x) * frame_w, float(wrist.y) * frame_h)
+    except Exception:
+        return None
 
 
-feedback_worker = threading.Thread(target=_feedback_worker_loop, daemon=True)
-feedback_worker.start()
+def detect_ball_state(frame_bgr, landmarks, frame_w, frame_h):
+    wrist = _choose_wrist(landmarks, frame_w, frame_h)
+    if wrist is None:
+        return {'detected': False, 'in_hand_score': None, 'palm_gap_px': None}
+
+    gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+    gray = cv2.GaussianBlur(gray, (9, 9), 2)
+    circles = cv2.HoughCircles(
+        gray,
+        cv2.HOUGH_GRADIENT,
+        dp=1.2,
+        minDist=frame_h * 0.12,
+        param1=120,
+        param2=25,
+        minRadius=8,
+        maxRadius=int(frame_h * 0.15)
+    )
+
+    if circles is None or len(circles) == 0:
+        return {'detected': False, 'in_hand_score': None, 'palm_gap_px': None}
+
+    circles = np.round(circles[0, :]).astype(int)
+    best = None
+    best_dist = None
+    for (x, y, r) in circles:
+        d = _dist((x, y), wrist)
+        if best is None or d < best_dist:
+            best = (x, y, r)
+            best_dist = d
+
+    if best is None:
+        return {'detected': False, 'in_hand_score': None, 'palm_gap_px': None}
+
+    x, y, r = best
+    scale_px = _compute_scale_px(landmarks, frame_w, frame_h)
+    palm_gap_px = max(0.0, best_dist - float(r)) if best_dist is not None else None
+    in_hand_score = None
+    if best_dist is not None:
+        denom = max(0.45 * scale_px, 1.0)
+        in_hand_score = max(0.0, min(1.0, 1.0 - (best_dist / denom)))
+
+    return {
+        'detected': True,
+        'in_hand_score': float(in_hand_score) if in_hand_score is not None else None,
+        'palm_gap_px': float(palm_gap_px) if palm_gap_px is not None else None,
+        'ball_center_px': {'x': int(x), 'y': int(y)},
+        'ball_radius_px': int(r)
+    }
 
 
 def generate_frames():
