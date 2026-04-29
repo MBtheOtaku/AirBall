@@ -12,12 +12,17 @@ export function VideoUploader({ userId }: { userId: string }) {
   const [isDragging, setIsDragging] = useState(false)
   const [analysisStatus, setAnalysisStatus] = useState<AnalysisStatus>("idle")
   const [uploadError, setUploadError] = useState<string | null>(null)
+  const [activeFileName, setActiveFileName] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const isUploading = analysisStatus !== "idle" && analysisStatus !== "done"
 
   const handleUpload = useCallback(
     async (file: File) => {
+      if (isUploading) {
+        return
+      }
+
       if (!file.type.startsWith("video/")) {
         setUploadError("Please upload a video file")
         return
@@ -30,6 +35,7 @@ export function VideoUploader({ userId }: { userId: string }) {
 
       setAnalysisStatus("uploading")
       setUploadError(null)
+      setActiveFileName(file.name)
 
       const supabase = createClient()
       const fileExt = file.name.split(".").pop()
@@ -43,6 +49,7 @@ export function VideoUploader({ userId }: { userId: string }) {
       if (storageError) {
         setUploadError("Upload failed. Please try again.")
         setAnalysisStatus("idle")
+        setActiveFileName(null)
         return
       }
 
@@ -65,6 +72,7 @@ export function VideoUploader({ userId }: { userId: string }) {
       if (dbError || !insertedRow) {
         setUploadError("Failed to save video record. Please try again.")
         setAnalysisStatus("idle")
+        setActiveFileName(null)
         return
       }
 
@@ -126,9 +134,14 @@ export function VideoUploader({ userId }: { userId: string }) {
       }
 
       setAnalysisStatus("idle")
+      setActiveFileName(null)
+      if (fileInputRef.current) {
+        // Allow re-selecting the same file after an attempt completes.
+        fileInputRef.current.value = ""
+      }
       mutate("videos")
     },
-    [userId]
+    [isUploading, userId]
   )
 
   const handleDrop = useCallback(
@@ -153,10 +166,14 @@ export function VideoUploader({ userId }: { userId: string }) {
     <div>
       <div
         onDragOver={(e) => {
+          if (isUploading) return
           e.preventDefault()
           setIsDragging(true)
         }}
-        onDragLeave={() => setIsDragging(false)}
+        onDragLeave={() => {
+          if (isUploading) return
+          setIsDragging(false)
+        }}
         onDrop={handleDrop}
         className={`flex flex-col items-center justify-center rounded-xl border-2 border-dashed p-12 text-center transition-colors ${
           isDragging
@@ -182,10 +199,15 @@ export function VideoUploader({ userId }: { userId: string }) {
         </div>
 
         {isUploading ? (
-          <p className="text-sm font-medium text-foreground">
-            {analysisStatus === "uploading" && "Uploading video..."}
-            {analysisStatus === "analyzing" && "Analyzing your shot with AI... This may take a moment."}
-          </p>
+          <>
+            <p className="text-sm font-medium text-foreground">
+              {analysisStatus === "uploading" && "Uploading video..."}
+              {analysisStatus === "analyzing" && "Analyzing your shot with AI... This may take a moment."}
+            </p>
+            {activeFileName && (
+              <p className="mt-2 text-xs text-muted-foreground">{activeFileName}</p>
+            )}
+          </>
         ) : (
           <>
             <p className="text-sm font-medium text-foreground">
@@ -199,6 +221,7 @@ export function VideoUploader({ userId }: { userId: string }) {
               size="sm"
               className="mt-4"
               onClick={() => fileInputRef.current?.click()}
+              disabled={isUploading}
             >
               Choose file
             </Button>
