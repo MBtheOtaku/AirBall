@@ -1,9 +1,19 @@
 import cv2
 import mediapipe as mp
 import numpy as np
+import os
 
 
 mp_pose = mp.solutions.pose
+
+
+BALL_HOUGH_DP = float(os.getenv("AIRBALL_BALL_HOUGH_DP", "1.2"))
+BALL_HOUGH_MIN_DIST_RATIO = float(os.getenv("AIRBALL_BALL_HOUGH_MIN_DIST_RATIO", "0.12"))
+BALL_HOUGH_PARAM1 = int(os.getenv("AIRBALL_BALL_HOUGH_PARAM1", "120"))
+BALL_HOUGH_PARAM2 = int(os.getenv("AIRBALL_BALL_HOUGH_PARAM2", "25"))
+BALL_MIN_RADIUS_PX = int(os.getenv("AIRBALL_BALL_MIN_RADIUS_PX", "8"))
+BALL_MAX_RADIUS_RATIO = float(os.getenv("AIRBALL_BALL_MAX_RADIUS_RATIO", "0.15"))
+WRIST_MIN_VISIBILITY = float(os.getenv("AIRBALL_WRIST_MIN_VISIBILITY", "0.45"))
 
 
 def _dist(p1, p2):
@@ -26,6 +36,8 @@ def _choose_wrist(landmarks, frame_w, frame_h):
     try:
         rv = float(getattr(landmarks[mp_pose.PoseLandmark.RIGHT_WRIST], 'visibility', 0.0))
         lv = float(getattr(landmarks[mp_pose.PoseLandmark.LEFT_WRIST], 'visibility', 0.0))
+        if max(rv, lv) < WRIST_MIN_VISIBILITY:
+            return None
         wrist_idx = mp_pose.PoseLandmark.RIGHT_WRIST if rv >= lv else mp_pose.PoseLandmark.LEFT_WRIST
         wrist = landmarks[wrist_idx]
         return (float(wrist.x) * frame_w, float(wrist.y) * frame_h)
@@ -43,12 +55,12 @@ def detect_ball_state(frame_bgr, landmarks, frame_w, frame_h):
     circles = cv2.HoughCircles(
         gray,
         cv2.HOUGH_GRADIENT,
-        dp=1.2,
-        minDist=frame_h * 0.12,
-        param1=120,
-        param2=25,
-        minRadius=8,
-        maxRadius=int(frame_h * 0.15)
+        dp=BALL_HOUGH_DP,
+        minDist=frame_h * BALL_HOUGH_MIN_DIST_RATIO,
+        param1=BALL_HOUGH_PARAM1,
+        param2=BALL_HOUGH_PARAM2,
+        minRadius=BALL_MIN_RADIUS_PX,
+        maxRadius=max(int(frame_h * BALL_MAX_RADIUS_RATIO), BALL_MIN_RADIUS_PX + 1),
     )
 
     if circles is None or len(circles) == 0:
